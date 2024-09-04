@@ -322,7 +322,7 @@ const scsaMatchInfo = async (matchInfo) => {
           //    0,
           //    0
           //  ]
-          const pens = ss.penss;
+          const pens = ss.penss || [];
           const penaltyCount = pens.flat().reduce((p, c) => p + c, 0);
           const detailedScores = stageScoresMap[stage_uuid]?.[ss.shtr] || {};
 
@@ -330,7 +330,7 @@ const scsaMatchInfo = async (matchInfo) => {
             .map((s, idx) => {
               const penCountsForString = pens[idx];
               // Multiply the count of each penalties by their value, and sum the result.
-              const totalStringPenalties = penCountsForString.reduce(
+              const totalStringPenalties = (penCountsForString || []).reduce(
                 (p, c, idx) => p + c * match_penalties[idx].pen_val,
                 0
               );
@@ -515,8 +515,6 @@ const uploadResultsForMatches = async (matches) => {
   for (const match of matches) {
     switch (match.templateName) {
       case "Steel Challenge": {
-        // TODO: fix Steel Challenge after upload changes, will be skipped for now
-        break;
         const scsaResults = await scsaMatchInfo(match);
         matchResults.push(scsaResults);
         break;
@@ -759,16 +757,15 @@ const findAFewMatches = async (extraFilter) =>
 
 const uploadLoop = async () => {
   // TODO: add Steel Challenge here once supported
-  const onlyUSPSAOrHF = { templateName: { $in: ["USPSA", "Hit Factor"] } };
-  const onlyUSPSA = { templateName: { $in: ["USPSA"] } };
-  const count = await Matches.countDocuments(matchesForUploadFilter(onlyUSPSA));
-  console.log(count + " uploads in the queue (USPSA only)");
+  const onlyUSPSAorSCSA = { templateName: { $in: ["USPSA", "Steel Challenge"] } };
+  const count = await Matches.countDocuments(matchesForUploadFilter(onlyUSPSAorSCSA));
+  console.log(count + " uploads in the queue (USPSA, SCSA only)");
 
   let numberOfUpdates = 0;
   let fewMatches = [];
   let totalMatchesUploaded = 0;
   do {
-    fewMatches = await findAFewMatches(onlyUSPSA);
+    fewMatches = await findAFewMatches(onlyUSPSAorSCSA);
     totalMatchesUploaded += fewMatches.length;
     if (!fewMatches.length) {
       return numberOfUpdates;

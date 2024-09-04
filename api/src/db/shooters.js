@@ -488,7 +488,7 @@ export const reclassifyShooters = async (shooters) => {
 
     const updates = shooters
       .map(({ memberNumber, division, name }) => {
-        if (!memberNumber) {
+        if (!memberNumber || division.startsWith('scsa')) {
           return [];
         }
         const recMemberScores = recScoresByMemberNumber[memberNumber];
