@@ -139,12 +139,33 @@ export const allDivisionsScoresByMemberNumber = async (memberNumbers) => {
 };
 
 const _divisionExplosion = () => [
-  { $set: { hfuDivisionCompatabilityMap } },
+  {
+    $set: {
+      hfuDivisionCompatabilityMap: { $objectToArray: hfuDivisionCompatabilityMap },
+    },
+  },
   {
     $set: {
       division: [
         "$division",
-        { $getField: { input: "$hfuDivisionCompatabilityMap", field: "$division" } },
+        {
+          $getField: {
+            input: {
+              $arrayElemAt: [
+                {
+                  $filter: {
+                    input: "$hfuDivisionCompatabilityMap",
+                    cond: {
+                      $eq: ["$$this.k", "$division"],
+                    },
+                  },
+                },
+                0,
+              ],
+            },
+            field: "v",
+          },
+        },
       ],
     },
   },
@@ -488,7 +509,7 @@ export const reclassifyShooters = async (shooters) => {
 
     const updates = shooters
       .map(({ memberNumber, division, name }) => {
-        if (!memberNumber || division.startsWith('scsa')) {
+        if (!memberNumber || division.startsWith("scsa")) {
           return [];
         }
         const recMemberScores = recScoresByMemberNumber[memberNumber];
