@@ -1,6 +1,10 @@
 import uniqBy from "lodash.uniqby";
 import { v4 as randomUUID } from "uuid";
 
+import {
+  classifierRoundCount,
+  normalizeClassifierCode,
+} from "../../api/src/dataUtil/classifiersData";
 import { allDivShortNames, mapAllDivisions } from "../../api/src/dataUtil/divisions";
 
 import { dateSort, numSort } from "./sort";
@@ -9,6 +13,46 @@ export const classificationRank = classification =>
   ["X", "U", "D", "C", "B", "A", "M", "GM"].indexOf(classification);
 /* const hasClassification = (classification) =>
   ["D", "C", "B", "A", "M", "GM"].indexOf(classification) !== -1; */
+
+/**
+ * Reverse-engineered USPSA Classification Algorithm
+ * B, C and D flags are allowed.
+ */
+type ModeUSPSA = "uspsa";
+
+/**
+ * HFI's Recommended Algorithm
+ *
+ * B/C flags are disabled, same day D flags are averaged out and count as one score
+ * (must be done at DB read level to group same-day D-scores into one, see
+ * scoresForRecommendedClassificationByMemberNumber() in api/src/db/shooters )
+ */
+type ModeBrutal = "brutal";
+
+/**
+ * Older HFI's Recommended Algorithm
+ *
+ * B/C flags are disabled, but D flag behaves the same way as USPSA.
+ * (must use non-brutal DB read method, see allDivisionsScoresByMemberNumber() in
+ * api/src/db/shooters )
+ */
+type ModeSoft = "soft";
+
+type WeightedByRoundCount = /*"allEqual" |*/ "weighted";
+
+// capped (default) = scores higher than 100% count as 100
+// uncapped = scores higher than 100% count up to 120%
+// default is capped
+type ScoreLimitMode = /*"capped" |*/ "uncapped";
+type ScoreMode =
+  | ScoreLimitMode
+  | WeightedByRoundCount
+  | `${ScoreLimitMode}+${WeightedByRoundCount}`;
+
+type AlgorithmMode = ModeUSPSA | ModeSoft | ModeBrutal;
+
+type Mode = AlgorithmMode | `${AlgorithmMode}+${ScoreMode}`;
+export type ClassificationMode = Mode;
 
 export const highestClassification = classificationsObj =>
   Object.values(classificationsObj).reduce((prev, curClass) => {
@@ -32,6 +76,27 @@ export const classForPercent = curPercent => {
   } else if (curPercent < 95) {
     return "M";
   } else if (curPercent >= 95) {
+    return "GM";
+  }
+
+  return "U";
+};
+
+export const eloClasses = [1625, 1434, 1245, 998, 700];
+export const classForELO = (eloRating: number) => {
+  if (eloRating <= 0) {
+    return "U";
+  } else if (eloRating < eloClasses[4]) {
+    return "D";
+  } else if (eloRating < eloClasses[3]) {
+    return "C";
+  } else if (eloRating < eloClasses[2]) {
+    return "B";
+  } else if (eloRating < eloClasses[1]) {
+    return "A";
+  } else if (eloRating < eloClasses[0]) {
+    return "M";
+  } else if (eloRating >= eloClasses[0]) {
     return "GM";
   }
 
@@ -68,7 +133,12 @@ export const lowestAllowedPercentForOtherDivisionClass = highestClassificationLe
     B: 40,
   })[highestClassificationLetter] || 0;
 
-export const canBeInserted = (c, state, percentField = "percent") => {
+export const canBeInserted = (
+  c,
+  state,
+  percentField = "percent",
+  mode: Mode = "uspsa",
+) => {
   try {
     const { division } = c;
     if (!allDivShortNames.includes(division)) {
@@ -97,15 +167,14 @@ export const canBeInserted = (c, state, percentField = "percent") => {
     }
 
     // recPercent == special recommended mode, no B/C flags, best 6 out of last 10
-    if ((isCFlag || isBFlag) && percentField !== "recPercent") {
+    if ((isCFlag || isBFlag) && mode.includes("uspsa")) {
       return false;
     }
 
     // D, F, E
     return true;
   } catch (all) {
-    console.error("canBeInserted crash");
-    console.error(c.division);
+    console.error(`canBeInserted crash ${c.division}`);
   }
   return false;
 };
@@ -118,13 +187,13 @@ export const hasDuplicate = (c, state) =>
   hasDuplicateInWindow(c, state[c.division].window);
 
 export const numberOfDuplicates = window => {
-  const table = {};
+  const table: Record<string, number> = {};
   window.forEach(c => {
     const curCount = table[c.classifier] || 0;
     table[c.classifier] = curCount + 1;
   });
   return Object.values(table)
-    .map(c => c - 1)
+    .map((c: number) => c - 1)
     .reduce((acc, cur) => acc + cur, 0);
 };
 
@@ -138,31 +207,51 @@ const windowSizeForScore = windowSize => {
   return 6;
 };
 
-const ageForDate = (now, sd) => (now - new Date(sd)) / (28 * 24 * 60 * 60 * 1000);
+const ageForDate = (now, sd) =>
+  (now - new Date(sd).getTime()) / (28 * 24 * 60 * 60 * 1000);
 export const percentAndAgesForDivWindow = (
   div,
   state,
   percentField = "percent",
   now = new Date(),
+  mode: Mode,
 ) => {
   //de-dupe needs to be done in reverse, because percent are sorted asc
   let window = state[div].window;
-  if (percentField !== "recPercent") {
+  // was !== recPercent
+  if (!mode.includes("brutal")) {
     // don't use best dupe for recommended, only most recent one
     window = window.toSorted((a, b) => numSort(a, b, percentField, -1));
   }
   const dFlagsApplied = uniqBy(window, c => c.classifier);
+  const percentCap = mode.includes("uncapped") ? 120 : 100;
 
   // remove lowest 2
   const newLength = windowSizeForScore(dFlagsApplied.length);
   const fFlagsApplied = dFlagsApplied
     .toSorted((a, b) => numSort(a, b, percentField, -1))
     .slice(0, newLength);
-  const percent = fFlagsApplied.reduce(
-    (acc, curValue, curIndex, allInWindow) =>
-      acc + Math.min(100, curValue[percentField]) / allInWindow.length,
-    0,
-  );
+  const useWeight = mode.includes("weighted");
+  const percent = fFlagsApplied.reduce((acc, curValue, curIndex, allInWindow) => {
+    const total = allInWindow.length;
+    const totalRoundCount = !useWeight
+      ? 0
+      : allInWindow.reduce((a, c) => {
+          const curRoundCount =
+            classifierRoundCount[normalizeClassifierCode(c.classifier)];
+          if (!curRoundCount) {
+            console.error(`No rounds count for ${c.classifier}`);
+          }
+          return a + curRoundCount;
+        }, 0);
+    const curScorePercent = Math.min(percentCap, curValue[percentField]);
+    const curContribution = !useWeight
+      ? curScorePercent / total
+      : (curScorePercent *
+          classifierRoundCount[normalizeClassifierCode(curValue.classifier)]) /
+        totalRoundCount;
+    return acc + curContribution;
+  }, 0);
 
   const age = fFlagsApplied.reduce(
     (acc, curValue, curIndex, allInWindow) =>
@@ -202,12 +291,22 @@ export const addToCurWindow = (c, curWindow, targetWindowSize = 8) => {
   curWindow.unshift(...extraFromTail);
 };
 
+interface ClassifierScore {
+  source: string;
+  classifier: string;
+  percent: number;
+  curPercent: number;
+  recPercent: number;
+}
+
 // TODO: minimal class as highest - 1
 // TODO: HFU divisions support through TDD
 export const calculateUSPSAClassification = (
-  classifiers,
-  percentField = "percent",
-  now = new Date(),
+  classifiers: ClassifierScore[],
+  percentField: string,
+  now: Date,
+  mode: Mode,
+  recentWindowSize: number,
 ) => {
   const state = newClassificationCalculationState();
   if (!classifiers?.length) {
@@ -228,16 +327,27 @@ export const calculateUSPSAClassification = (
       classifier: c.source === "Major Match" ? randomUUID() : c.classifier,
       curPercent: c.source === "Major Match" ? c.percent : c.curPercent,
     }))
-    .filter(c => c[percentField] >= 0);
+    .filter(c => {
+      // don't use majors and unknown classifier codes in weighted mode for classification
+      // (we don't have round count for that, but even if we did it would make
+      // majors dictate the whole thing)
+      if (
+        mode.includes("weighted") &&
+        !classifierRoundCount[normalizeClassifierCode(c.classifier)]
+      ) {
+        return false;
+      }
+      return c[percentField] >= 0;
+    });
 
   const scoringFunction = c => {
-    if (!canBeInserted(c, state, percentField)) {
+    if (!canBeInserted(c, state, percentField, mode)) {
       return;
     }
     const { division } = c;
     const curWindow = state[c.division].window;
 
-    addToCurWindow(c, curWindow, percentField === "recPercent" ? 10 : 8);
+    addToCurWindow(c, curWindow, recentWindowSize);
 
     // age1 can be set even before we have enough classifiers
     if (curWindow.length >= 1) {
@@ -253,7 +363,7 @@ export const calculateUSPSAClassification = (
         percent: newPercent,
         age,
         age1,
-      } = percentAndAgesForDivWindow(division, state, percentField, now);
+      } = percentAndAgesForDivWindow(division, state, percentField, now, mode);
 
       if (newPercent > oldHighPercent) {
         state[division].highPercent = newPercent;

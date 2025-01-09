@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+import { solveWeibull } from "../../../shared/utils/weibull";
 import { uspsaClassifiers } from "../dataUtil/classifiersData";
 import {
   allDivShortNames,
@@ -10,7 +11,7 @@ import {
 import { curHHFForDivisionClassifier } from "../dataUtil/hhf";
 import { HF, Percent, PositiveOrMinus1 } from "../dataUtil/numbers";
 
-import { minorHFScoresAdapter, Scores } from "./scores";
+import { minorHFScoresAdapter, Score, Scores } from "./scores";
 
 const LOW_SAMPLE_SIZE_DIVISIONS = new Set([
   "rev",
@@ -439,7 +440,11 @@ const recommendedHHFFunctionFor = ({ division, number }) => {
   return r1;
 };
 
-const runsForRecs = async ({ division, number }) =>
+interface ScoreWithPercentile extends Score {
+  percentile: number;
+}
+
+const runsForRecs = async ({ division, number }): Promise<ScoreWithPercentile[]> =>
   (
     await Scores.find({
       classifier: number,
@@ -512,6 +517,20 @@ export interface RecHHF {
   rec1HHF: number;
   rec5HHF: number;
   rec15HHF: number;
+
+  // Weibull
+  k: number;
+  lambda: number;
+  wbl1HHF: number;
+  wbl5HHF: number;
+  wbl15HHF: number;
+  kurtosis: number;
+  skewness: number;
+  meanSquaredError: number;
+  meanAbsoluteError: number;
+  superMeanSquaredError: number;
+  superMeanAbsoluteError: number;
+  maxError: number;
 }
 
 const RecHHFSchema = new mongoose.Schema<RecHHF>({
@@ -522,6 +541,21 @@ const RecHHFSchema = new mongoose.Schema<RecHHF>({
   rec1HHF: Number,
   rec5HHF: Number,
   rec15HHF: Number,
+
+  // Weibull
+  k: Number,
+  lambda: Number,
+  wbl1HHF: Number,
+  wbl5HHF: Number,
+  wbl15HHF: Number,
+  kurtosis: Number,
+  skewness: Number,
+  meanSquaredError: Number,
+  meanAbsoluteError: Number,
+  superMeanSquaredError: Number,
+  superMeanAbsoluteError: Number,
+  maxError: Number,
+
   classifierDivision: String,
 });
 
@@ -530,30 +564,63 @@ RecHHFSchema.index({ classifierDivision: 1 }, { unique: true });
 
 export const RecHHFs = mongoose.model("RecHHFs", RecHHFSchema);
 
-const recHHFUpdate = (runsRaw, division, classifier) => {
+const recHHFUpdate = (
+  runsRaw: ScoreWithPercentile[],
+  division: string,
+  classifier: string,
+) => {
   if (!runsRaw) {
     return null;
   }
 
   const runs = minorHFScoresAdapter(runsRaw, division);
-  const recHHF = recommendedHHFFunctionFor({
-    division,
-    number: classifier,
-  })(runs);
   const rec1HHF = r1(runs);
   const rec5HHF = r5(runs);
   const rec15HHF = r15(runs);
   const curHHF = curHHFForDivisionClassifier({ division, number: classifier }) || -1;
+
+  const {
+    k,
+    lambda,
+    hhf1: wbl1HHF,
+    hhf5: wbl5HHF,
+    hhf15: wbl15HHF,
+    kurtosis,
+    skewness,
+    meanSquaredError,
+    meanAbsoluteError,
+    superMeanSquaredError,
+    superMeanAbsoluteError,
+    maxError,
+  } = solveWeibull(
+    runs.map(c => c.hf),
+    12,
+    undefined,
+    "neldermead",
+  );
 
   return {
     division,
     classifier,
     classifierDivision: [classifier, division].join(":"),
     curHHF,
-    recHHF,
+    recHHF: wbl5HHF,
     rec1HHF,
     rec5HHF,
     rec15HHF,
+
+    k,
+    lambda,
+    wbl1HHF,
+    wbl5HHF,
+    wbl15HHF,
+    kurtosis,
+    skewness,
+    meanSquaredError,
+    meanAbsoluteError,
+    superMeanSquaredError,
+    superMeanAbsoluteError,
+    maxError,
   };
 };
 

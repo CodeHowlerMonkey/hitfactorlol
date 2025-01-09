@@ -155,7 +155,10 @@ const shootersRoutes = async fastify => {
       .select([
         "current",
         "reclassificationsCurPercentCurrent",
+        "reclassificationsRecHHFOnlyPercentCurrent",
+        "reclassificationsSoftPercentCurrent",
         "reclassificationsRecPercentCurrent",
+        "reclassificationsRecPercentUncappedCurrent",
         "memberNumber",
       ])
       .lean()
@@ -165,7 +168,10 @@ const shootersRoutes = async fastify => {
       .map(c => ({
         curPercent: c.current,
         curHHFPercent: c.reclassificationsCurPercentCurrent,
+        recHHFOnlyPercent: c.reclassificationsRecHHFOnlyPercentCurrent,
+        recSoftPercent: c.reclassificationsSoftPercentCurrent,
         recPercent: c.reclassificationsRecPercentCurrent,
+        recPercentUncapped: c.reclassificationsRecPercentUncappedCurrent,
         memberNumber: c.memberNumber,
       }))
       .sort(safeNumSort("curPercent"))
@@ -177,6 +183,21 @@ const shootersRoutes = async fastify => {
       .map((c, i, all) => ({
         ...c,
         curHHFPercentPercentile: (100 * i) / (all.length - 1),
+      }))
+      .sort(safeNumSort("recHHFOnlyPercent"))
+      .map((c, i, all) => ({
+        ...c,
+        recHHFOnlyPercentPercentile: (100 * i) / (all.length - 1),
+      }))
+      .sort(safeNumSort("recSoftPercent"))
+      .map((c, i, all) => ({
+        ...c,
+        recSoftPercentPercentile: (100 * i) / (all.length - 1),
+      }))
+      .sort(safeNumSort("recPercentUncapped"))
+      .map((c, i, all) => ({
+        ...c,
+        recPercentUncappedPercentile: (100 * i) / (all.length - 1),
       }))
       .sort(safeNumSort("recPercent"))
       .map((c, i, all) => ({

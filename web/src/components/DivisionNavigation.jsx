@@ -131,11 +131,19 @@ export const defaultDivisionForSport = sport => {
   }
 };
 
-export const DivisionNavigation = ({ onSelect, uspsaOnly, disableSCSA, hideSCSA }) => {
+export const DivisionNavigation = ({
+  onSelect,
+  uspsaOnly,
+  disableSCSA,
+  hideSCSA,
+  forcedDivision,
+}) => {
   // TODO: save in localStorage last sport/division selection
   const { division } = useParams();
 
-  const [initialSport, initialDivisionIndex] = sportAndDivisionIndexForDivision(division);
+  const [initialSport, initialDivisionIndex] = sportAndDivisionIndexForDivision(
+    forcedDivision || division,
+  );
   const [sportCode, setSportCode] = useState(initialSport);
   const [activeIndex, setActiveIndex] = useState(initialDivisionIndex);
 
@@ -190,6 +198,9 @@ export const DivisionNavigation = ({ onSelect, uspsaOnly, disableSCSA, hideSCSA 
       ? []
       : uspsaDivisions.map(uspsaDiv => (
           <TabPanel
+            disabled={
+              !!forcedDivision && uspsaDiv.short_name.toLowerCase() !== forcedDivision
+            }
             key={uspsaDiv.id}
             header={uspsaDiv.long_name}
             className="p-0 text-sm md:text-base"
@@ -199,6 +210,7 @@ export const DivisionNavigation = ({ onSelect, uspsaOnly, disableSCSA, hideSCSA 
       ? []
       : scsaDivisions.map(curDiv => (
           <TabPanel
+            disabled={!!forcedDivision && curDiv.short !== forcedDivision}
             key={curDiv.long}
             header={curDiv.long}
             className="p-0 text-sm md:text-base"

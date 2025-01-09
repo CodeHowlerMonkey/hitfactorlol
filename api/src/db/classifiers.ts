@@ -4,6 +4,7 @@ import uniqBy from "lodash.uniqby";
 import mongoose, { Model } from "mongoose";
 
 import { stringSort } from "../../../shared/utils/sort";
+import { correlation } from "../../../shared/utils/weibull";
 import {
   basicInfoForClassifier,
   classifiers as _classifiers,
@@ -15,7 +16,7 @@ import { hhfsForDivision } from "../dataUtil/hhf";
 import { HF, Percent } from "../dataUtil/numbers";
 
 import { RecHHFs, RecHHF } from "./recHHF";
-import { minorHFScoresAdapter, Scores } from "./scores";
+import { minorHFScoresAdapter, ScoreObjectWithVirtuals, Scores } from "./scores";
 import { Score } from "./scores";
 
 export interface Classifier {
@@ -37,11 +38,20 @@ export interface Classifier {
   inverse75CurPercentPercentile: number;
   inverse60CurPercentPercentile: number;
   inverse40CurPercentPercentile: number;
+
+  // new cc fields
+  eloCorrelation: number;
+  classificationCorrelation: number;
 }
 
 interface ClassifierVirtuals {
+  recHHFs: RecHHF;
   quality: number;
   hqQuality: number;
+
+  // new cc virtuals
+  superMeanSquaredError: number;
+  ccQuality: number;
 }
 
 type ClassifierModel = Model<Classifier, object, ClassifierVirtuals>;
@@ -95,7 +105,7 @@ const extendedInfoForClassifier = (
     return {};
   }
   const curHHFInfo = divisionHHFs.find(dHHF => dHHF.classifier === c.id);
-  const hhf = Number(curHHFInfo.hhf);
+  const hhf = Number(curHHFInfo?.hhf);
 
   const topXPercentileStats = x => ({
     [`top${x}PercentilePercent`]:
@@ -140,7 +150,7 @@ const extendedInfoForClassifier = (
     .sort((a, b) => stringSort(a, b, "id", 1));
 
   const result = {
-    updated: curHHFInfo.updated, //actualLastUpdate, // before was using curHHFInfo.updated, and it's bs
+    updated: curHHFInfo?.updated, //actualLastUpdate, // before was using curHHFInfo.updated, and it's bs
     hhf,
     prevHHF: hhfs.findLast(curHistorical => curHistorical.hhf !== hhf)?.hhf ?? hhf,
     hhfs,
@@ -151,6 +161,10 @@ const extendedInfoForClassifier = (
       (r, v, k) => (r[`runsTotalsLegit${k}`] = v),
     ),
     runs: hitFactorScores.length,
+    prod10Runs: hitFactorScores.filter(c => new Date(c.sd).getTime() < 1706770800000)
+      .length,
+    prod15Runs: hitFactorScores.filter(c => new Date(c.sd).getTime() >= 1706770800000)
+      .length,
     top10CurPercentAvg:
       hitFactorScores
         .slice(0, 10)
@@ -193,6 +207,10 @@ const ClassifierSchema = new mongoose.Schema<
     inverse75CurPercentPercentile: Number,
     inverse60CurPercentPercentile: Number,
     inverse40CurPercentPercentile: Number,
+
+    // new cc fields
+    eloCorrelation: Number,
+    classificationCorrelation: Number,
   },
   { strict: false },
 );
@@ -211,6 +229,44 @@ const scoresCountOffset = runsCount => {
 
   return 0;
 };
+
+ClassifierSchema.virtual("recHHFs", {
+  ref: "RecHHFs",
+  foreignField: "classifier",
+  localField: "classifier",
+  match: classifier => ({ division: classifier.division }),
+  justOne: true,
+});
+
+[
+  "recHHF",
+  "rec1HHF",
+  "rec5HHF",
+  "rec15HHF",
+  "wbl1HHF",
+  "wbl5HHF",
+  "wbl15HHF",
+  "k",
+  "lambda",
+  "kurtosis",
+  "skewness",
+  "meanSquaredError",
+  "meanAbsoluteError",
+  "superMeanSquaredError",
+  "superMeanAbsoluteError",
+  "maxError",
+].map(fieldName =>
+  ClassifierSchema.virtual(fieldName).get(function () {
+    return this.recHHFs?.[fieldName];
+  }),
+);
+
+ClassifierSchema.virtual("ccQuality").get(function () {
+  return (
+    (200 * this.eloCorrelation + 100 * this.classificationCorrelation) / 2.4 -
+    this.superMeanSquaredError
+  );
+});
 
 ClassifierSchema.virtual("quality").get(function () {
   return (
@@ -256,17 +312,52 @@ export const singleClassifierExtendedMetaDoc = async (
   }
   const [recHHFQuery, hitFactorScoresRaw] = await Promise.all([
     recHHFReady ?? RecHHFs.findOne({ division, classifier }).select("recHHF").lean(),
-    Scores.find<Score>({
+    Scores.find({
       division: { $in: divisionsForScoresAdapter(division) },
       classifier,
       hf: { $gte: 0 },
       bad: { $ne: true },
     })
+      .populate("Shooters")
       .sort({ hf: -1 })
-      .limit(0)
-      .lean(),
+      .limit(0),
   ]);
-  const hitFactorScores: Score[] = minorHFScoresAdapter(hitFactorScoresRaw, division);
+  const scores = hitFactorScoresRaw
+    .map(curScore => curScore.toObject({ virtuals: true }) as ScoreObjectWithVirtuals)
+    .map(curScore => ({
+      ...curScore,
+      elo: curScore.Shooters?.[0]?.elo,
+      recPercentUncapped:
+        curScore.Shooters?.[0]?.reclassificationsRecPercentUncappedCurrent,
+    }));
+
+  // best scores correlate better than most recent on 20-01:co
+  const eloCorrelationScores = uniqBy(
+    scores.filter(cur => cur.elo > 0 && cur.hf > 0).sort((a, b) => b.hf - a.hf),
+    cur => cur.memberNumber,
+  );
+  const eloCorrelation =
+    eloCorrelationScores.length >= 4
+      ? correlation(
+          eloCorrelationScores.map(cur => cur.elo),
+          eloCorrelationScores.map(cur => cur.hf),
+        )
+      : 0;
+  const classificationCorrelationScores = uniqBy(
+    scores
+      .filter(cur => cur.recPercentUncapped > 0 && cur.hf > 0)
+      .sort((a, b) => b.hf - a.hf),
+    cur => cur.memberNumber,
+  );
+  const classificationCorrelation =
+    classificationCorrelationScores.length >= 4
+      ? correlation(
+          classificationCorrelationScores.map(cur => cur.recPercentUncapped),
+          classificationCorrelationScores.map(cur => cur.hf),
+        )
+      : 0;
+
+  const hitFactorScores: Score[] = minorHFScoresAdapter(scores, division);
 
   const recHHF = recHHFQuery?.recHHF ?? 0;
   const inverseRecPercentileStats = xPercent => ({
@@ -290,6 +381,8 @@ export const singleClassifierExtendedMetaDoc = async (
     ...inverseRecPercentileStats(75),
     ...inverseRecPercentileStats(60),
     ...inverseRecPercentileStats(40),
+    eloCorrelation,
+    classificationCorrelation,
   };
 };
 
@@ -302,10 +395,10 @@ export const allDivisionClassifiersQuality = async () => {
   }
 
   const [coDB, opnDB, ltdDB, pccDB] = await Promise.all([
-    Classifiers.find({ division: "co" }),
-    Classifiers.find({ division: "opn" }),
-    Classifiers.find({ division: "ltd" }),
-    Classifiers.find({ division: "pcc" }),
+    Classifiers.find({ division: "co" }).populate("recHHFs"),
+    Classifiers.find({ division: "opn" }).populate("recHHFs"),
+    Classifiers.find({ division: "ltd" }).populate("recHHFs"),
+    Classifiers.find({ division: "pcc" }).populate("recHHFs"),
   ]);
 
   const co: (Classifier & ClassifierVirtuals)[] = coDB.map(c =>
@@ -332,7 +425,8 @@ export const allDivisionClassifiersQuality = async () => {
 
   _allDivQuality = co.reduce((acc, c) => {
     const id = c.classifier;
-    acc[id] = (c.quality + opn[id].quality + ltd[id].quality + pcc[id].quality) / 4;
+    acc[id] =
+      (c.ccQuality + opn[id].ccQuality + ltd[id].ccQuality + pcc[id].ccQuality) / 4;
     return acc;
   }, {});
 

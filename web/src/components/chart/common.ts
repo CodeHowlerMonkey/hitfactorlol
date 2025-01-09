@@ -2,6 +2,9 @@ export { Scatter, Line } from "react-chartjs-2";
 import { Chart, registerables } from "chart.js";
 import annotationPlugin from "chartjs-plugin-annotation";
 import zoomPlugin from "chartjs-plugin-zoom";
+
+import { fuzzyEqual } from "../../../../shared/utils/hitfactor";
+
 import "chartjs-adapter-date-fns";
 Chart.register(...registerables);
 Chart.register(annotationPlugin);
@@ -28,7 +31,7 @@ export const yLine = (name, y, color) => ({
   },
 });
 
-export const xLine = (name, x, color, extraLabelOffset = 0) => ({
+export const xLine = (name, x, color, extraLabelOffset = 0, lowY = false) => ({
   [name]: {
     type: "line",
     xMin: x,
@@ -39,7 +42,7 @@ export const xLine = (name, x, color, extraLabelOffset = 0) => ({
   [`${name}Label`]: {
     type: "label",
     xValue: x,
-    yValue: 95 - 2 * extraLabelOffset,
+    yValue: lowY ? 15 + 2 * extraLabelOffset : 95 - 2 * extraLabelOffset,
     color,
     position: "start",
     content: [name],
@@ -60,15 +63,58 @@ export const point = (name, x, y, color) => ({
   },
 });
 
+export interface GraphPoint {
+  x: number;
+  y: number;
+}
+
+export const closestYForX = (targetX: number, dataRaw: GraphPoint[]): number => {
+  if (!dataRaw?.length) {
+    return -1;
+  }
+
+  const perfect = dataRaw.find(c => fuzzyEqual(targetX, c.x, 0.001));
+  if (perfect) {
+    return perfect.y;
+  }
+
+  const data = dataRaw.toSorted((a, b) => a.x - b.x);
+  let lowIndex = data.findLastIndex(c => c.x < targetX);
+  let highIndex = data.findIndex(c => c.x > targetX);
+  let indexOffset = 0;
+
+  if (highIndex < 0) {
+    highIndex = lowIndex;
+    lowIndex = lowIndex - 1;
+    indexOffset = 1;
+  }
+
+  if (lowIndex < 0) {
+    return -1;
+  }
+
+  const lowPoint = data[lowIndex];
+  const highPoint = data[highIndex];
+  const startPoint = data[lowIndex + indexOffset];
+
+  if (highPoint.x === lowPoint.x) {
+    return lowPoint.y;
+  }
+
+  const k = (highPoint.y - lowPoint.y) / (highPoint.x - lowPoint.x);
+  const result = startPoint.y + k * (targetX - startPoint.x);
+  return result;
+};
+
 /** Generates a dataset of points, with X within [minX, maxX] and y
  * determined by the yFn(x).
  */
-export const pointsGraph = ({ yFn, minX, maxX, name }) => {
+export const pointsGraph = ({ yFn, minX, maxX, name, step: stepParam }) => {
   if (!yFn || minX === maxX) {
     return [];
   }
 
-  const step = 0.005;
+  const step = stepParam || 0.005;
   const totalPoints = Math.ceil((maxX - minX) / step);
 
   const result = Array.from({ length: totalPoints }, (v, i) => {

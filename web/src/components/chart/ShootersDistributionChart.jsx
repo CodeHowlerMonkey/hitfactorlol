@@ -1,35 +1,37 @@
 import { ProgressSpinner } from "primereact/progressspinner";
 import { SelectButton } from "primereact/selectbutton";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { classForPercent } from "../../../../shared/utils/classification";
+import { weibulCDFFactory } from "../../../../shared/utils/weibull";
 import { useApi } from "../../utils/client";
 import { bgColorForClass } from "../../utils/color";
 import { useIsHFU } from "../../utils/useIsHFU";
 
-import { annotationColor, r5annotationColor, xLine, yLine, Scatter } from "./common";
-
-const lines = {
-  ...yLine("1th", 1.0, annotationColor(0.7)),
-  ...yLine("4.5th", 4.5, annotationColor(0.5)),
-  ...yLine("15th", 14.5, annotationColor(0.4)),
-  ...yLine("45th", 45, annotationColor(0.3)),
-  ...yLine("85th", 85, annotationColor(0.2)),
-  ...xLine("95%", 95, r5annotationColor(0.5), 2.5),
-  ...xLine("85%", 85, r5annotationColor(0.5), 2.5),
-  ...xLine("75%", 75, r5annotationColor(0.5), 2.5),
-  ...xLine("60%", 60, r5annotationColor(0.5), 2.5),
-  ...xLine("40%", 40, r5annotationColor(0.5), 2.5),
-};
+import {
+  annotationColor,
+  r5annotationColor,
+  xLine,
+  yLine,
+  Scatter,
+  wbl1AnnotationColor,
+  pointsGraph,
+  closestYForX,
+} from "./common";
+import { useAsyncWeibull } from "./useAsyncWeibull";
+import { WeibullStatus } from "./WeibullStatus";
 
 const fieldModeMap = {
   HQ: "curPercent",
   "Cur.HHF": "curHHFPercent",
-  "Rec.": "recPercent",
+  "Rec.HHFOnly": "recHHFOnlyPercent",
+  "Rec.Soft": "recSoftPercent",
+  "Rec.Brutal": "recPercent",
+  "Rec.Brutal Uncapped": "recPercentUncapped",
 };
 const fieldForMode = mode => fieldModeMap[mode];
 const modes = Object.keys(fieldModeMap);
-const recommendedMode = modes[2];
+const recommendedMode = modes[4];
 
 export const ShootersDistributionChart = ({ division, style }) => {
   const isHFU = useIsHFU(division);
@@ -42,11 +44,39 @@ export const ShootersDistributionChart = ({ division, style }) => {
 
   const { json: data, loading } = useApi(`/shooters/${division}/chart`);
 
+  const curModeData = useMemo(
+    () =>
+      data
+        ?.map(c => ({
+          ...c,
+          x: c[fieldForMode(xMode)],
+          y: c[`${fieldForMode(xMode)}Percentile`],
+        }))
+        ?.filter(c => c.y > 0 && c.x > 0) || [],
+    [data, xMode],
+  );
+
+  const percentiles = useMemo(
+    () => [
+      closestYForX(95, curModeData),
+      closestYForX(85, curModeData),
+      closestYForX(75, curModeData),
+      closestYForX(60, curModeData),
+      closestYForX(40, curModeData),
+    ],
+    [curModeData],
+  );
+
+  const curModeDataPoints = useMemo(() => curModeData.map(c => c.x), [curModeData]);
+
+  const weibull = useAsyncWeibull(curModeDataPoints);
+  const { k, lambda } = weibull;
+
   if (loading) {
     return <ProgressSpinner />;
   }
 
-  if (!data) {
+  if (!curModeData.length) {
     return null;
   }
 
@@ -77,25 +107,71 @@ export const ShootersDistributionChart = ({ division, style }) => {
           tooltip: {
             callbacks: {
               label: ({
-                raw: { recPercent, curHHFPercent, curPercent, memberNumber, y },
-              }) =>
-                `${memberNumber}; ${y.toFixed(
+                raw: {
+                  recPercent,
+                  curHHFPercent,
+                  curPercent,
+                  memberNumber,
+                  y,
+                  pointsGraphName,
+                },
+              }) => {
+                if (pointsGraphName) {
+                  return null;
+                }
+                return `${memberNumber}; Top ${y.toFixed(
                   2,
-                )}th, Rec: ${recPercent}%, curHHF: ${curHHFPercent}%, HQ: ${curPercent}%`,
+                )}%, Rec: ${recPercent}%, HQ/curHHF: ${curHHFPercent}%`;
+              },
             },
           },
-          annotation: { annotations: lines },
+          annotation: {
+            annotations: {
+              // TODO: [local experiment only] uncap hundo and reclassify all CO
+              // shooters to see how it affects percentiles.
+              //
+              // Intuition: currently M is around target, A,B,C are easier than 85th/60th/20th
+              // and GM is harder than 99th, possibly due to "compression" of GM classifier
+              // scores on the upper end. By removing the hundo-cap we should increase classification of
+              // people, who have >100% runs, which should be relatively small, but increases number of GMs
+              ...Object.assign(
+                {},
+                ...percentiles.map((perc, i) =>
+                  yLine(
+                    `Top ${perc?.toFixed(2)}% = ${["GM", "M", "A", "B", "C"][i]}`,
+                    perc,
+                    annotationColor(0.75),
+                  ),
+                ),
+              ),
+              ...xLine("95%", 95, r5annotationColor(0.5), 2.5),
+              ...xLine("85%", 85, r5annotationColor(0.5), 2.5),
+              ...xLine("75%", 75, r5annotationColor(0.5), 2.5),
+              ...xLine("60%", 60, r5annotationColor(0.5), 2.5),
+              ...xLine("40%", 40, r5annotationColor(0.5), 2.5),
+            },
+          },
         },
       }}
       data={{
         datasets: [
           {
+            label: "Weibull",
+            data: pointsGraph({
+              yFn: weibulCDFFactory(k, lambda),
+              minX: 0,
+              maxX: 100,
+              step: 0.1,
+              name: "Weibull",
+            }),
+            pointRadius: 1,
+            pointBorderColor: "black",
+            pointBorderWidth: 0,
+            pointBackgroundColor: wbl1AnnotationColor(0.66),
+          },
+          {
             label: "Classification / Percentile",
-            data: data?.map(c => ({
-              ...c,
-              x: c[fieldForMode(xMode)],
-              y: c[`${fieldForMode(xMode)}Percentile`],
-            })),
+            data: curModeData,
             pointBorderColor: "white",
             pointBorderWidth: 0,
             backgroundColor: "#ae9ef1",
@@ -110,31 +186,40 @@ export const ShootersDistributionChart = ({ division, style }) => {
 
   return (
     <div style={style}>
-      {!isHFU && (
-        <div className="flex mt-4 justify-content-around text-base lg:text-xl">
-          <div className="flex flex-row flex-wrap justify-content-center gap-2">
-            <span className="mx-4">Color:</span>
-            <SelectButton
-              className="compact"
-              allowEmpty={false}
-              options={modes}
-              value={colorMode}
-              onChange={e => setColorMode(e.value)}
-            />
+      <div className="flex mt-4 justify-content-start gap-4 mb-2 text-base lg:text-xl">
+        {!isHFU && (
+          <div className="flex flex-column gap-2">
+            <div className="flex flex-column justify-content-center align-items-start">
+              <span className="text-md text-500 font-bold">Color</span>
+              <SelectButton
+                className="compact text-xs"
+                allowEmpty={false}
+                options={modes}
+                value={colorMode}
+                onChange={e => setColorMode(e.value)}
+              />
+            </div>
+            <div className="flex flex-column justify-content-center align-items-start">
+              <span className="text-md text-500 font-bold">Position</span>
+              <SelectButton
+                className="compact text-xs"
+                allowEmpty={false}
+                options={modes}
+                value={xMode}
+                onChange={e => setXMode(e.value)}
+              />
+            </div>
           </div>
-          <div className="flex flex-row flex-wrap justify-content-center gap-2">
-            <span className="mx-4">Position:</span>
-            <SelectButton
-              className="compact"
-              allowEmpty={false}
-              options={modes}
-              value={xMode}
-              onChange={e => setXMode(e.value)}
-            />
-          </div>
-        </div>
-      )}
-      <div style={{ maxWidth: "100%", height: "calc(100vh - 420px)", minHeight: 360 }}>
+        )}
+        <WeibullStatus weibull={weibull} />
+      </div>
+      <div
+        style={{
+          maxWidth: "100%",
+          height: "calc(100vh - 420px)",
+          minHeight: "calc(max(60vh, 60vw))",
+        }}
+      >
         {graph}
       </div>
     </div>

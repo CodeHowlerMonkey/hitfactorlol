@@ -165,7 +165,7 @@ const classifiersRoutes = async fastify => {
         division,
         classifier: { $exists: true, $ne: null },
         code: { $exists: true, $ne: null },
-      }),
+      }).populate("recHHFs"),
       division.startsWith("scsa")
         ? allScsaDivisionClassifiersQuality()
         : allDivisionClassifiersQuality(),
@@ -308,33 +308,27 @@ const classifiersRoutes = async fastify => {
       {
         $addFields: {
           scoreRecPercent: percentAggregationOp("$hf", "$recHHF", 4),
-          curPercent: {
-            $getField: {
-              input: { $arrayElemAt: ["$shooters", 0] },
-              field: "current",
-            },
-          },
-          curHHFPercent: {
-            $getField: {
-              input: { $arrayElemAt: ["$shooters", 0] },
-              field: "reclassificationsCurPercentCurrent",
-            },
-          },
-          recPercent: {
-            $getField: {
-              input: { $arrayElemAt: ["$shooters", 0] },
-              field: "reclassificationsRecPercentCurrent",
-            },
-          },
+          curPercent: _getShooterField("current"),
+          curHHFPercent: _getShooterField("reclassificationsCurPercentCurrent"),
+          recHHFOnlyPercent: _getShooterField(
+            "reclassificationsRecHHFOnlyPercentCurrent",
+          ),
+          recSoftPercent: _getShooterField("reclassificationsSoftPercentCurrent"),
+          recPercent: _getShooterField("reclassificationsRecPercentCurrent"),
+          recPercentUncapped: _getShooterField(
+            "reclassificationsRecPercentUncappedCurrent",
+          ),
+          elo: _getShooterField("elo"),
+          name: _getShooterField("name"),
         },
       },
       {
         $project: {
           shooters: false,
+          recHHFs: false,
           memberNumberDivision: false,
           classifier: false,
           division: false,
-          recHHF: false,
         },
       },
 
@@ -346,6 +340,7 @@ const classifiersRoutes = async fastify => {
     const hhf = curHHFForDivisionClassifier({ number, division });
     const allPoints = runs
       .map((run, index, allRuns) => ({
+        ...run,
         x: HF(run.hf),
         y: PositiveOrMinus1(Percent(index, allRuns.length)),
         memberNumber: run.memberNumber,

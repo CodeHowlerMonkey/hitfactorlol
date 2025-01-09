@@ -60,6 +60,7 @@ export interface RecHHF {
 }
 
 export interface ScoreVirtuals {
+  Shooters: Record<string, any>[];
   HHFs: RecHHF[];
   curHHF: number;
   recHHF: number;
@@ -70,6 +71,7 @@ export interface ScoreVirtuals {
 }
 
 type ScoreModel = Model<Score, object, ScoreVirtuals>;
+export type ScoreObjectWithVirtuals = Score & ScoreVirtuals & { _id: string };
 
 const ScoreSchema = new mongoose.Schema<Score, ScoreModel, ScoreVirtuals>(
   {
@@ -130,6 +132,11 @@ ScoreSchema.virtual("hfuHF").get(function () {
 });
 ScoreSchema.virtual("isMajor").get(function () {
   return this.source === "Major Match";
+});
+ScoreSchema.virtual("Shooters", {
+  ref: "Shooters",
+  foreignField: "memberNumberDivision",
+  localField: "memberNumberDivision",
 });
 ScoreSchema.virtual("HHFs", {
   ref: "RecHHFs",
